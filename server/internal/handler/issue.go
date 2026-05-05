@@ -1345,15 +1345,6 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	if req.Description != nil {
 		params.Description = pgtype.Text{String: *req.Description, Valid: true}
 	}
-	if req.Status != nil {
-		status, err := h.resolveIssueStatusKey(r.Context(), prevIssue.WorkspaceID, params.ProjectID, *req.Status)
-		if err != nil {
-			statusCode, msg := issueWorkflowErrorResponse(err)
-			writeError(w, statusCode, msg)
-			return
-		}
-		params.Status = pgtype.Text{String: status, Valid: true}
-	}
 	if req.Priority != nil {
 		params.Priority = pgtype.Text{String: *req.Priority, Valid: true}
 	}
@@ -1440,6 +1431,15 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		} else {
 			params.ProjectID = pgtype.UUID{Valid: false}
 		}
+	}
+	if req.Status != nil {
+		status, err := h.resolveIssueStatusKey(r.Context(), prevIssue.WorkspaceID, params.ProjectID, *req.Status)
+		if err != nil {
+			statusCode, msg := issueWorkflowErrorResponse(err)
+			writeError(w, statusCode, msg)
+			return
+		}
+		params.Status = pgtype.Text{String: status, Valid: true}
 	}
 
 	// Validate the resulting (assignee_type, assignee_id) pair when the caller
@@ -1762,13 +1762,6 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		if req.Updates.Description != nil {
 			params.Description = pgtype.Text{String: *req.Updates.Description, Valid: true}
 		}
-		if req.Updates.Status != nil {
-			status, err := h.resolveIssueStatusKey(r.Context(), prevIssue.WorkspaceID, params.ProjectID, *req.Updates.Status)
-			if err != nil {
-				continue
-			}
-			params.Status = pgtype.Text{String: status, Valid: true}
-		}
 		if req.Updates.Priority != nil {
 			params.Priority = pgtype.Text{String: *req.Updates.Priority, Valid: true}
 		}
@@ -1854,6 +1847,13 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			} else {
 				params.ProjectID = pgtype.UUID{Valid: false}
 			}
+		}
+		if req.Updates.Status != nil {
+			status, err := h.resolveIssueStatusKey(r.Context(), prevIssue.WorkspaceID, params.ProjectID, *req.Updates.Status)
+			if err != nil {
+				continue
+			}
+			params.Status = pgtype.Text{String: status, Valid: true}
 		}
 
 		// Validate the resulting assignee pair when this batch update touches
