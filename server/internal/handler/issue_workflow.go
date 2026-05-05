@@ -101,9 +101,20 @@ func (h *Handler) ensureDefaultIssueWorkflow(ctx context.Context, workspaceID, p
 	}
 	defer tx.Rollback(ctx)
 
-	workflow, err = h.findDefaultIssueWorkflowTx(ctx, tx, workspaceID, projectID)
+	workflow, err = h.ensureDefaultIssueWorkflowTx(ctx, tx, workspaceID, projectID)
+	if err != nil {
+		return pgtype.UUID{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return pgtype.UUID{}, err
+	}
+	return workflow, nil
+}
+
+func (h *Handler) ensureDefaultIssueWorkflowTx(ctx context.Context, tx pgx.Tx, workspaceID, projectID pgtype.UUID) (pgtype.UUID, error) {
+	workflow, err := h.findDefaultIssueWorkflowTx(ctx, tx, workspaceID, projectID)
 	if err == nil {
-		return workflow, tx.Commit(ctx)
+		return workflow, nil
 	}
 	if !isNoRows(err) {
 		return pgtype.UUID{}, err
@@ -142,9 +153,6 @@ func (h *Handler) ensureDefaultIssueWorkflow(ctx context.Context, workspaceID, p
 	}
 
 	if err := seedDefaultIssueWorkflowTx(ctx, tx, workflow); err != nil {
-		return pgtype.UUID{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return pgtype.UUID{}, err
 	}
 	return workflow, nil

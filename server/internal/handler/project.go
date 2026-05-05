@@ -235,6 +235,10 @@ func (h *Handler) CreateProject(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to create project")
 			return
 		}
+		if err := h.ensureDefaultIssueWorkflowForProject(r.Context(), project); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create project issue workflow")
+			return
+		}
 		resp := projectToResponse(project)
 		h.publish(protocol.EventProjectCreated, workspaceID, "member", userID, map[string]any{"project": resp})
 		writeJSON(w, http.StatusCreated, resp)
@@ -253,6 +257,10 @@ func (h *Handler) CreateProject(w http.ResponseWriter, r *http.Request) {
 	project, err := qtx.CreateProject(r.Context(), createParams)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create project")
+		return
+	}
+	if _, err := h.ensureDefaultIssueWorkflowTx(r.Context(), tx, project.WorkspaceID, project.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create project issue workflow")
 		return
 	}
 
