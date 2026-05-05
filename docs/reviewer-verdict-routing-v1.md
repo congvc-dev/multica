@@ -45,21 +45,20 @@ ESCALATED ──(human resolves + reassigns)──▶ IMPLEMENTING
 
 ---
 
-## 3. Idempotency Keys
+## 3. Fix-Task Idempotency Keys
 
-Fix tasks are keyed by `{head_sha}:{verdict_id}` to prevent duplicates.
+Fix tasks are keyed by `{pr_url}:{head_sha}` to prevent duplicates. `verdict_id` identifies a specific review event for audit purposes only — it is not the fix-task uniqueness key.
 
 | Scenario | Driver behavior |
 |---|---|
-| Same verdict re-posted (same `verdict_id`) | Look up task by idempotency key → reuse existing; do NOT create second task |
-| Same HEAD SHA, new verdict ID | New idempotency key → create new fix task (reviewer ran again on same commit) |
-| New HEAD SHA, new verdict ID | New idempotency key → new fix task (implementer pushed; new review cycle) |
-| New HEAD SHA, stale verdict ID re-used | Should not happen; `verdict_id` is UUID per emission — treat as duplicate of old verdict |
+| Same PR head SHA, any verdict_id | Fix-task key matches → reuse existing task; do NOT create second task |
+| New HEAD SHA (implementer pushed) | New fix-task key → create new fix task (new review cycle) |
+| New PR (different pr_url), any SHA | New fix-task key → create new fix task |
 
-**Storage:** idempotency key is written to the fix task description as a machine-readable tag:
+**Storage:** fix-task key is written to the fix task description as a machine-readable tag:
 
 ```
-<!-- multica:fix-task-key {head_sha}:{verdict_id} -->
+<!-- multica:fix-task-key {pr_url}:{head_sha} -->
 ```
 
 Driver scans existing child issues for this tag before creating a new task.
@@ -171,13 +170,14 @@ Label `review-escalated` is attached when escalated so humans can filter.
 
 Per DRV-79 §6 — driver behavior when envelope parse fails:
 
-| Failure | Derived verdict | Driver action |
-|---|---|---|
-| JSON parse fails | WARNING | Log `malformed-envelope` finding; do NOT create fix task; post audit comment |
-| Unknown `schema_version` | WARNING | Log `unsupported-schema-version`; treat as prose fallback |
-| `verdict` inconsistent with `max(severity)` | Derived from findings | Override; log `verdict-severity-mismatch` |
-| Missing required fields | BLOCKER | Escalate; log `incomplete-envelope` |
-| Findings exceed cap | — | Trim to cap; add `cap-exceeded` info finding |
+| Failure | Driver action |
+|---|---|
+| No structured envelope (prose-only comment) | `malformed-envelope` → AUDIT_ONLY: log finding, no task, no escalation |
+| JSON parse fails | `malformed-envelope` → AUDIT_ONLY: log finding, no task, no escalation |
+| Unknown `schema_version` | `unsupported-schema-version` → ESCALATE: fail closed; human review needed |
+| `verdict` inconsistent with `max(severity)` | Override with derived verdict; log `verdict-severity-mismatch`; continue routing |
+| Missing required fields | `incomplete-envelope` → ESCALATE: fail closed; human review needed |
+| Findings exceed cap | Trim to cap; add `cap-exceeded` info finding; continue routing |
 
 Driver never auto-retriggers reviewer on malformed verdict (loop risk). Post one audit comment; stop.
 
@@ -207,9 +207,9 @@ No `mention://agent` at any step. Assignment + status change + comment on assign
 | Parse valid REQUEST_CHANGES envelope | Same | verdict=REQUEST_CHANGES, findings non-empty |
 | Parse valid BLOCKER envelope | Same | verdict=BLOCKER, findings with critical severity |
 | Parse valid WARNING envelope | Same | verdict=WARNING |
-| Prose-only comment (no envelope) | Plain text "LGTM" | Returns `null` envelope; fallback WARNING decision |
-| Malformed JSON in envelope | Garbled JSON | `ParseResult.error = 'malformed-envelope'` |
-| Unknown schema version | `schema_version: "99"` | `ParseResult.error = 'unsupported-schema-version'` |
+| Prose-only comment (no envelope) | Plain text "LGTM" | `ParseResult.error = 'malformed-envelope'`; `routeMalformedVerdict` → AUDIT_ONLY |
+| Malformed JSON in envelope | Garbled JSON | `ParseResult.error = 'malformed-envelope'`; → AUDIT_ONLY |
+| Unknown schema version | `schema_version: "99"` | `ParseResult.error = 'unsupported-schema-version'`; `routeMalformedVerdict` → ESCALATE (fail closed) |
 | Verdict/severity mismatch | verdict=APPROVED but finding.severity=critical | Derived verdict=BLOCKER; `mismatch` flag set |
 | Missing required fields | Envelope without `verdict_id` | `ParseResult.error = 'incomplete-envelope'`; treated as BLOCKER |
 | Cap exceeded | 25 findings | Trimmed to 20; `cap-exceeded` info finding appended |
@@ -219,9 +219,9 @@ No `mention://agent` at any step. Assignment + status change + comment on assign
 
 | Test | Scenario | Expected |
 |---|---|---|
-| Duplicate verdict — same idempotency key | `routeVerdict` called twice with same head_sha+verdict_id, existing fix task present | Returns `action=REUSE_TASK`, same task ID |
-| Moved head SHA — new commit, new verdict | New head_sha, new verdict_id; no existing task with key | Returns `action=CREATE_TASK` |
-| New verdict on same SHA | Same head_sha, new verdict_id (reviewer ran again) | Returns `action=CREATE_TASK` (new verdict cycle) |
+| Same PR head SHA, any verdict_id (W4) | `routeVerdict` called with same pr_url+head_sha, existing fix task present | Returns `action=REUSE_TASK`, same task ID |
+| Moved head SHA — new commit | New head_sha (pr_url same); no existing task with new key | Returns `action=CREATE_TASK` |
+| Same SHA, new verdict_id (reviewer re-ran) (W4) | Same head_sha, different verdict_id; existing fix task present | Returns `action=REUSE_TASK` — no duplicate task |
 | APPROVED routing | verdict=APPROVED | Returns `action=MERGE_GATE` |
 | WARNING routing | verdict=WARNING | Returns `action=MERGE_GATE` + findings surfaced |
 | BLOCKER scope-change check | BLOCKER with `check=scope-change` | Returns `action=ESCALATE` |

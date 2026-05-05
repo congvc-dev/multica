@@ -3,7 +3,7 @@ import {
   parseVerdictFromComment,
   routeVerdict,
   routeMalformedVerdict,
-  buildIdempotencyKey,
+  buildFixTaskKey,
   extractFixTaskKey,
   buildFixTaskKeyTag,
   buildFixTaskDraft,
@@ -200,16 +200,19 @@ describe("parseVerdictFromComment", () => {
 
 // ── Idempotency key tests ─────────────────────────────────────────────────────
 
-describe("buildIdempotencyKey", () => {
-  it("combines head_sha and verdict_id", () => {
-    expect(buildIdempotencyKey("abc1234", "uuid-1")).toBe("abc1234:uuid-1");
+describe("buildFixTaskKey", () => {
+  it("combines pr_url and head_sha", () => {
+    expect(buildFixTaskKey("https://github.com/multica-ai/multica/pull/1", "abc1234")).toBe(
+      "https://github.com/multica-ai/multica/pull/1:abc1234"
+    );
   });
 });
 
 describe("extractFixTaskKey", () => {
   it("extracts key from description tag", () => {
-    const desc = `Some text\n${buildFixTaskKeyTag("abc1234:uuid-1")}\nMore text`;
-    expect(extractFixTaskKey(desc)).toBe("abc1234:uuid-1");
+    const key = "https://github.com/multica-ai/multica/pull/1:abc1234";
+    const desc = `Some text\n${buildFixTaskKeyTag(key)}\nMore text`;
+    expect(extractFixTaskKey(desc)).toBe(key);
   });
 
   it("returns null when no tag present", () => {
@@ -263,7 +266,7 @@ describe("routeVerdict", () => {
     const decision = routeVerdict(env, makeContext());
     expect(decision.action).toBe("CREATE_TASK");
     expect(decision.idempotencyKey).toBe(
-      buildIdempotencyKey(env.pr.head_sha, env.verdict_id)
+      buildFixTaskKey(env.pr.url, env.pr.head_sha)
     );
   });
 
@@ -282,18 +285,45 @@ describe("routeVerdict", () => {
         },
       ],
     });
-    const key = buildIdempotencyKey(env.pr.head_sha, env.verdict_id);
+    const key = buildFixTaskKey(env.pr.url, env.pr.head_sha);
     const ctx = makeContext({ existingFixTasks: [makeFixTask(key)] });
     const decision = routeVerdict(env, ctx);
     expect(decision.action).toBe("REUSE_TASK");
     expect(decision.fixTaskId).toBe("task-001");
   });
 
+  it("W4: same PR head SHA different verdict_id → REUSE_TASK (no duplicate fix task)", () => {
+    const base: Partial<VerdictEnvelope> = {
+      verdict: "REQUEST_CHANGES",
+      pr: { url: "https://github.com/multica-ai/multica/pull/1", head_sha: "abc1234", base_sha: "f0e9d8c" },
+      findings: [
+        {
+          id: "sha256:rc-w4",
+          severity: "high",
+          check: "missing-test",
+          rationale: "Missing test.",
+          required_action: "Add test.",
+          location: { file: "foo.ts", line: 1, range: null, commit_sha: "abc1234" },
+          tags: [],
+        },
+      ],
+    };
+    const env1 = makeEnvelope({ ...base, verdict_id: "aaaaaaaa-0000-0000-0000-000000000001" });
+    const env2 = makeEnvelope({ ...base, verdict_id: "bbbbbbbb-0000-0000-0000-000000000002" });
+    // First review created a fix task keyed by PR head SHA
+    const key = buildFixTaskKey(env1.pr.url, env1.pr.head_sha);
+    const ctx = makeContext({ existingFixTasks: [makeFixTask(key)] });
+    // Second review on same PR + same SHA but different verdict_id → must reuse, not duplicate
+    const decision = routeVerdict(env2, ctx);
+    expect(decision.action).toBe("REUSE_TASK");
+    expect(decision.idempotencyKey).toBe(key);
+  });
+
   it("creates new task when head SHA moved (new commit, same verdict struct)", () => {
-    // New head SHA = new idempotency key even if verdict_id is different
+    // New head SHA = new fix-task key (prUrl:headSha)
     const env = makeEnvelope({
       verdict: "REQUEST_CHANGES",
-      pr: { url: "https://...", head_sha: "newsha99", base_sha: "f0e9d8c" },
+      pr: { url: "https://github.com/multica-ai/multica/pull/1", head_sha: "newsha99", base_sha: "f0e9d8c" },
       verdict_id: "bbbbbbbb-0000-0000-0000-000000000002",
       findings: [
         {
@@ -307,12 +337,14 @@ describe("routeVerdict", () => {
         },
       ],
     });
-    // Old task has old key (different sha + verdict_id)
-    const oldKey = buildIdempotencyKey("abc1234", "aaaaaaaa-0000-0000-0000-000000000001");
+    // Old task keyed to old SHA — different from new SHA
+    const oldKey = buildFixTaskKey("https://github.com/multica-ai/multica/pull/1", "abc1234");
     const ctx = makeContext({ existingFixTasks: [makeFixTask(oldKey)] });
     const decision = routeVerdict(env, ctx);
     expect(decision.action).toBe("CREATE_TASK");
-    expect(decision.idempotencyKey).toBe("newsha99:bbbbbbbb-0000-0000-0000-000000000002");
+    expect(decision.idempotencyKey).toBe(
+      buildFixTaskKey("https://github.com/multica-ai/multica/pull/1", "newsha99")
+    );
   });
 
   it("routes BLOCKER with code fix to CREATE_TASK", () => {
@@ -421,13 +453,23 @@ describe("routeVerdict", () => {
 });
 
 describe("routeMalformedVerdict", () => {
-  it("returns AUDIT_ONLY for malformed-envelope", () => {
+  it("returns AUDIT_ONLY for malformed-envelope (W1: prose-only → no task, no escalation)", () => {
     const result = routeMalformedVerdict({ ok: false, error: "malformed-envelope", rawContent: "" });
+    expect(result.action).toBe("AUDIT_ONLY");
+  });
+
+  it("returns AUDIT_ONLY for cap-exceeded (non-fatal warning)", () => {
+    const result = routeMalformedVerdict({ ok: false, error: "cap-exceeded", rawContent: "" });
     expect(result.action).toBe("AUDIT_ONLY");
   });
 
   it("returns ESCALATE for incomplete-envelope (fail closed)", () => {
     const result = routeMalformedVerdict({ ok: false, error: "incomplete-envelope", rawContent: "" });
+    expect(result.action).toBe("ESCALATE");
+  });
+
+  it("W2: returns ESCALATE for unsupported-schema-version (fail closed)", () => {
+    const result = routeMalformedVerdict({ ok: false, error: "unsupported-schema-version", rawContent: "" });
     expect(result.action).toBe("ESCALATE");
   });
 });
@@ -451,7 +493,7 @@ describe("buildFixTaskDraft", () => {
         },
       ],
     });
-    const key = buildIdempotencyKey(env.pr.head_sha, env.verdict_id);
+    const key = buildFixTaskKey(env.pr.url, env.pr.head_sha);
     const draft = buildFixTaskDraft(env, "DRV-80", key);
     expect(draft.title).toContain("REQUEST_CHANGES");
     expect(draft.title).toContain("aaaaaaaa");
@@ -459,7 +501,7 @@ describe("buildFixTaskDraft", () => {
 
   it("description embeds idempotency key tag", () => {
     const env = makeEnvelope({ verdict: "REQUEST_CHANGES" });
-    const key = buildIdempotencyKey(env.pr.head_sha, env.verdict_id);
+    const key = buildFixTaskKey(env.pr.url, env.pr.head_sha);
     const draft = buildFixTaskDraft(env, "DRV-80", key);
     expect(draft.description).toContain(`<!-- multica:fix-task-key ${key} -->`);
   });
@@ -479,7 +521,7 @@ describe("buildFixTaskDraft", () => {
         },
       ],
     });
-    const key = buildIdempotencyKey(env.pr.head_sha, env.verdict_id);
+    const key = buildFixTaskKey(env.pr.url, env.pr.head_sha);
     const draft = buildFixTaskDraft(env, "DRV-80", key);
     expect(draft.description).toContain("sql-injection");
     expect(draft.description).toContain("Parameterize query");
@@ -507,7 +549,7 @@ describe("buildFixTaskDraft", () => {
       },
     ];
     const env = makeEnvelope({ verdict: "REQUEST_CHANGES", findings });
-    const key = buildIdempotencyKey(env.pr.head_sha, env.verdict_id);
+    const key = buildFixTaskKey(env.pr.url, env.pr.head_sha);
     const draft = buildFixTaskDraft(env, "DRV-80", key);
     expect(draft.description).toContain("high-check");
     expect(draft.description).toContain("1 lower-severity finding");
@@ -533,7 +575,7 @@ describe("buildFixTaskDraft", () => {
         { name: "pnpm typecheck", status: "passed", evidence: "ok" },
       ],
     });
-    const key = buildIdempotencyKey(env.pr.head_sha, env.verdict_id);
+    const key = buildFixTaskKey(env.pr.url, env.pr.head_sha);
     const draft = buildFixTaskDraft(env, "DRV-80", key);
     expect(draft.description).toContain("pnpm test");
     expect(draft.description).not.toContain("pnpm typecheck");
